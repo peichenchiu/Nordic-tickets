@@ -1,0 +1,69 @@
+name: Daily Finland/Norway fare check
+
+on:
+  schedule:
+    # 台灣時間 11:15 開始（GitHub 排程常晚 10～20 分鐘，查詢約 25 分鐘），信件約中午 12:00 寄達。
+    # cron 用 UTC：台灣 = UTC+8
+    - cron: "15 3 * * *"
+    # 備援：GitHub 忙碌時可能略過排程；主排程已跑過或正在跑，備援會直接跳過
+    - cron: "45 3 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "只查前幾組日期（診斷用，空白=全部）"
+        required: false
+      test_email:
+        description: "只寄一封測試信（不查票）"
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Skip if another scheduled run already covers this slot
+        id: guard
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          since=$(date -u -d '-100 min' +%Y-%m-%dT%H:%M:%SZ)
+          n=$(gh api "repos/${{ github.repository }}/actions/workflows/nordic.yml/runs?event=schedule&created=>$since" \
+            --jq "[.workflow_runs[] | select(.id != ${{ github.run_id }} and .id < ${{ github.run_id }}
+                   and (.conclusion == \"success\" or .status == \"in_progress\" or .status == \"queued\"))] | length")
+          echo "earlier runs in this slot: $n"
+          if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v4
+      - if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - if: steps.guard.outputs.skip != 'true'
+        run: pip install -r requirements.txt && python -m playwright install --with-deps chromium
+      - name: Check fares
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          LIMIT: ${{ inputs.limit }}
+          TEST_EMAIL: ${{ inputs.test_email }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: python check_nordic.py
+      - name: Upload results & debug
+        if: always() && steps.guard.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nordic-results
+          path: |
+            results/
+            debug/
+          retention-days: 14
