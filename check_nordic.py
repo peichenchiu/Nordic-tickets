@@ -40,6 +40,7 @@ ADULTS = int(os.getenv("ADULTS") or "2")
 CHILDREN = int(os.getenv("CHILDREN") or "1")  # 2～11 歲
 WORKERS = int(os.getenv("WORKERS") or "6")
 LIMIT = int(os.getenv("LIMIT") or "0")  # 只查前幾組（診斷用），0 = 不限
+DRY_RUN = os.getenv("DRY_RUN") == "true"  # 只查價，不寄信也不記錄歷史
 
 RESULTS = Path("results")
 DEBUG = Path("debug")
@@ -392,6 +393,16 @@ def main() -> int:
     (RESULTS / "nordic.json").write_text(json.dumps(results, ensure_ascii=False, indent=2),
                                          encoding="utf-8")
     ok = sorted((r for r in results if r["status"] == "ok"), key=lambda r: r["min_price"])
+    if ok:  # 價格分布，方便評估推薦門檻
+        prices = [r["min_price"] for r in ok]
+        q = lambda p: prices[min(len(prices) - 1, int(len(prices) * p))]
+        airlines: dict[str, int] = {}
+        for r in ok:
+            key = f"{r['out_airlines']} / {r['ret_airlines']}"
+            airlines[key] = min(airlines.get(key, r["min_price"]), r["min_price"])
+        print(f"價格分布：最低 {prices[0]:,}、10% {q(0.1):,}、25% {q(0.25):,}、中位數 {q(0.5):,}、"
+              f"75% {q(0.75):,}、最高 {prices[-1]:,}")
+        print("各航空組合最低：" + "；".join(f"{k} {v:,}" for k, v in sorted(airlines.items(), key=lambda x: x[1])))
     counts = {s: sum(r["status"] == s for r in results)
               for s in ("no_flights", "blocked", "no_price", "error")}
     summary = (f"查詢 {len(results)} 組日期，成功 {len(ok)} 組；"
@@ -420,7 +431,7 @@ def main() -> int:
     prev_low = min(history.values()) if history else None
     yesterday = history.get((now.date() - dt.timedelta(days=1)).isoformat())
     history[now.date().isoformat()] = min(best, history.get(now.date().isoformat(), best))
-    if not LIMIT:  # 診斷用的部分查詢不算進歷史紀錄
+    if not LIMIT and not DRY_RUN:  # 診斷用的部分查詢不算進歷史紀錄
         save_history(history, issue_no)
 
     reasons = []

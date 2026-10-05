@@ -16,6 +16,10 @@ on:
         description: "只寄一封測試信（不查票）"
         type: boolean
         default: false
+      dry_run:
+        description: "只查價、不寄信、不記錄歷史（評估用）"
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -51,10 +55,11 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         env:
           LIMIT: ${{ inputs.limit }}
+          DRY_RUN: ${{ inputs.dry_run }}
           TEST_EMAIL: ${{ inputs.test_email }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_USER: ${{ inputs.dry_run != true && secrets.SMTP_USER || '' }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: python check_nordic.py
