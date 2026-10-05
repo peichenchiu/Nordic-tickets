@@ -20,6 +20,9 @@ on:
         description: "只查價、不寄信、不記錄歷史（評估用）"
         type: boolean
         default: false
+      require_airline:
+        description: "評估用：只看有這家航空的行程（英文名稱，例如 China Airlines）；會同時取消託運行李排除"
+        required: false
 
 permissions:
   actions: read
@@ -56,6 +59,8 @@ jobs:
         env:
           LIMIT: ${{ inputs.limit }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REQUIRE_AIRLINE: ${{ inputs.require_airline }}
+          REQUIRE_BAGS: ${{ inputs.require_airline && '0' || '' }}
           TEST_EMAIL: ${{ inputs.test_email }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}

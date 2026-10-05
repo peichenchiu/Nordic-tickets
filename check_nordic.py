@@ -66,6 +66,8 @@ EXCLUDE_AIRLINES = [a.strip() for a in (os.getenv("EXCLUDE_AIRLINES") or "Turkis
                     if a.strip()]
 EXCLUDE_RE = (re.compile("|".join(rf"\b{re.escape(n)}\b" for n in EXCLUDE_AIRLINES), re.I)
               if EXCLUDE_AIRLINES else None)
+# 評估用：只看行程中有某家航空的班次（例如 "China Airlines"），空白 = 不限
+REQUIRE_AIRLINE = os.getenv("REQUIRE_AIRLINE") or ""
 NO_BAG_RE = re.compile("|".join(rf"\b{re.escape(n)}\b" for n in NO_BAG_FARES))
 # Google Flights 每個班次列的 aria-label，例如：
 # "From 152345 New Taiwan dollars. 1 stop flight with EVA Air and Finnair. Leaves ..."
@@ -173,6 +175,7 @@ def pick(opts: list[dict]) -> dict | None:
     good = [o for o in opts if o["airlines"] and not LOW_COST_RE.search(o["airlines"])
             and not (REQUIRE_BAGS and NO_BAG_RE.search(o["airlines"]))
             and not (EXCLUDE_RE and EXCLUDE_RE.search(o["airlines"]))
+            and (not REQUIRE_AIRLINE or REQUIRE_AIRLINE.lower() in o["airlines"].lower())
             and (o["stops"] is None or o["stops"] <= MAX_STOPS)]
     return min(good, key=lambda o: o["price"]) if good else None
 
