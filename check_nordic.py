@@ -60,6 +60,11 @@ NO_BAG_FARES = [
     "SAS", "Scandinavian", "British Airways", "Iberia", "Aer Lingus", "LOT", "ITA",
     "Icelandair", "airBaltic", "Delta", "United", "American", "Air Canada", "Virgin Atlantic",
 ]
+# 自己不想搭的航空（逗號分隔，名稱比對不分大小寫）；行程中任一段有這些航空就排除
+EXCLUDE_AIRLINES = [a.strip() for a in (os.getenv("EXCLUDE_AIRLINES") or "Turkish Airlines").split(",")
+                    if a.strip()]
+EXCLUDE_RE = (re.compile("|".join(rf"\b{re.escape(n)}\b" for n in EXCLUDE_AIRLINES), re.I)
+              if EXCLUDE_AIRLINES else None)
 NO_BAG_RE = re.compile("|".join(rf"\b{re.escape(n)}\b" for n in NO_BAG_FARES))
 # Google Flights 每個班次列的 aria-label，例如：
 # "From 152345 New Taiwan dollars. 1 stop flight with EVA Air and Finnair. Leaves ..."
@@ -166,6 +171,7 @@ async def select(page, opt: dict, before: list[dict]) -> None:
 def pick(opts: list[dict]) -> dict | None:
     good = [o for o in opts if o["airlines"] and not LOW_COST_RE.search(o["airlines"])
             and not (REQUIRE_BAGS and NO_BAG_RE.search(o["airlines"]))
+            and not (EXCLUDE_RE and EXCLUDE_RE.search(o["airlines"]))
             and (o["stops"] is None or o["stops"] <= MAX_STOPS)]
     return min(good, key=lambda o: o["price"]) if good else None
 
@@ -291,8 +297,15 @@ def _gh():
             {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
 
 
+def search_config() -> str:
+    """查詢條件摘要；條件改了（例如排除某家航空）就重新累積歷史最低價，避免拿不同條件的價格比較。"""
+    return json.dumps([ORIGIN, FINLAND, NORWAY, str(DEPART_START), str(DEPART_END), TRIP_DAYS_MIN,
+                       TRIP_DAYS_MAX, MAX_STOPS, ADULTS, CHILDREN, REQUIRE_BAGS,
+                       sorted(a.lower() for a in EXCLUDE_AIRLINES)])
+
+
 def load_history() -> tuple[dict, int | None]:
-    """回傳 ({日期: 當天最低價}, issue 編號)。"""
+    """回傳 ({日期: 當天最低價}, issue 編號)；查詢條件跟紀錄時不同就回傳空的紀錄。"""
     api, h = _gh()
     if not api:
         return {}, None
@@ -301,8 +314,12 @@ def load_history() -> tuple[dict, int | None]:
                               params={"labels": HISTORY_LABEL, "state": "open"}).json()
         if not issues:
             return {}, None
-        m = re.search(r"<!-- history:(.*?) -->", issues[0].get("body") or "", re.S)
-        return (json.loads(m.group(1)) if m else {}), issues[0]["number"]
+        body = issues[0].get("body") or ""
+        m = re.search(r"<!-- history:(.*?) -->", body, re.S)
+        cfg = re.search(r"<!-- config:(.*?) -->", body, re.S)
+        if not m or not cfg or cfg.group(1) != search_config():
+            return {}, issues[0]["number"]
+        return json.loads(m.group(1)), issues[0]["number"]
     except Exception as e:
         print(f"load history failed: {e}", file=sys.stderr)
         return {}, None
@@ -314,7 +331,7 @@ def save_history(history: dict, number: int | None) -> None:
         return
     lines = "\n".join(f"- {d}：NT${p:,}" for d, p in sorted(history.items(), reverse=True))
     body = (f"芬蘭／挪威機票每日最低價紀錄（自動更新，請勿關閉）\n\n{lines}\n\n"
-            f"<!-- history:{json.dumps(history)} -->")
+            f"<!-- history:{json.dumps(history)} -->\n<!-- config:{search_config()} -->")
     try:
         if number:
             requests.patch(f"{api}/issues/{number}", headers=h, json={"body": body}, timeout=30)
@@ -388,7 +405,8 @@ def main() -> int:
     header = (f"台北 {ORIGIN} ⇄ 芬蘭 {FINLAND}／挪威 {NORWAY}（一進一出，多個城市行程）\n"
               f"出發 {DEPART_START}～{DEPART_END}，旅程 {TRIP_DAYS_MIN}～{TRIP_DAYS_MAX} 天，"
               f"經濟艙，{ADULTS} 成人 + {CHILDREN} 兒童，只看傳統航空，每段最多轉機 {MAX_STOPS} 次"
-              + ("，只看基本票種就含託運行李的航空" if REQUIRE_BAGS else ""))
+              + ("，只看基本票種就含託運行李的航空" if REQUIRE_BAGS else "")
+              + (f"，排除 {'、'.join(EXCLUDE_AIRLINES)}" if EXCLUDE_AIRLINES else ""))
 
     if not ok:
         print("沒有抓到任何價格，請查看 artifact 中的 debug 截圖。", file=sys.stderr)
