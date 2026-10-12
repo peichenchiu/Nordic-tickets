@@ -274,6 +274,8 @@ async def fail(page, result: dict, tag: str, opts: list[dict], leg: str) -> dict
     else:
         status = "no_price"
     result.update(status=status, leg=leg, options=len(opts))
+    if status == "no_price":  # 診斷用：記下頁面開頭，看是沒載完、被擋還是版面不同
+        result["page"] = re.sub(r"\s+", " ", text)[:300]
     if status != "no_flights":
         await save_debug(page, tag)
     return result
@@ -309,8 +311,8 @@ async def search_all(jobs: list[tuple[str, dt.date, dt.date]]) -> list[dict]:
         while not queue.empty():
             job = queue.get_nowait()
             r = await check_one(page, *job)
-            if r["status"] in ("error", "no_price"):  # 偶爾頁面沒載完或點選後沒反應，重查一次通常就好
-                await asyncio.sleep(3)
+            if r["status"] in ("error", "no_price"):  # 偶爾頁面沒載完或點選後沒反應，稍等再查一次
+                await asyncio.sleep(20)
                 r = await check_one(page, *job)
             print(json.dumps(r, ensure_ascii=False), flush=True)
             results.append(r)
