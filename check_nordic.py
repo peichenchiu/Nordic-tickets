@@ -38,7 +38,8 @@ MAX_STOPS = int(os.getenv("MAX_STOPS") or "1")  # 每段最多轉機幾次
 # 下列航空的長程經濟艙最便宜票種（Light/Basic）常不含託運行李，Google 顯示的最低價多半是這種票，
 # 預設排除；設 REQUIRE_BAGS=0 可改為不排除。
 REQUIRE_BAGS = (os.getenv("REQUIRE_BAGS") or "1") != "0"
-THRESHOLD_TWD = int(os.getenv("THRESHOLD_TWD") or "85000")  # 全家總價低於此就特別推薦
+# 全家總價低於此就特別推薦；0 = 不用門檻，只在創歷史新低時推薦
+THRESHOLD_TWD = int(os.getenv("THRESHOLD_TWD") or "0")
 ADULTS = int(os.getenv("ADULTS") or "2")
 CHILDREN = int(os.getenv("CHILDREN") or "1")  # 2～11 歲
 WORKERS = int(os.getenv("WORKERS") or "6")
@@ -72,23 +73,20 @@ EXCLUDE_RE = (re.compile("|".join(rf"\b{re.escape(n)}\b" for n in EXCLUDE_AIRLIN
 # 評估用：只看行程中有某家航空的班次（例如 "China Airlines"），空白 = 不限
 REQUIRE_AIRLINE = os.getenv("REQUIRE_AIRLINE") or ""
 # 各航空公司比價：依行程中的航空分組，由上往下比對，先符合的為準。
-# (名稱, 比對用的英文名, 最便宜票種是否一般含託運行李)
+# 只列長程經濟艙最便宜票種就含託運行李的航空；華航、長榮接歐洲航空（漢莎、芬航、KLM 等）的
+# 聯程票由華航／長榮開票，行李依華航／長榮規定（含託運）。芬航、KLM、漢莎等自己開的票
+# 最便宜票種常不含託運行李，不列入。
 AIRLINE_GROUPS = [
-    ("阿聯酋", r"Emirates", True), ("卡達", r"Qatar Airways", True),
-    ("長榮", r"EVA Air", True), ("華航", r"China Airlines", True),
-    ("國泰", r"Cathay Pacific", True), ("新加坡航空", r"Singapore Airlines", True),
-    ("泰航", r"Thai Airways|Thai(?! Lion| AirAsia| Smile)", True), ("星宇", r"STARLUX", True),
-    ("芬航", r"Finnair", False), ("KLM", r"KLM", False), ("法航", r"Air France", False),
-    ("漢莎", r"Lufthansa", False), ("瑞士航空", r"SWISS|Swiss", False),
-    ("奧地利航空", r"Austrian", False), ("SAS", r"\bSAS\b|Scandinavian", False),
-    ("英航", r"British Airways", False),
+    ("阿聯酋", r"Emirates"), ("卡達", r"Qatar Airways"),
+    ("長榮", r"EVA Air"), ("華航", r"China Airlines"),
+    ("國泰", r"Cathay Pacific"), ("新加坡航空", r"Singapore Airlines"),
+    ("泰航", r"Thai Airways|Thai(?! Lion| AirAsia| Smile)"), ("星宇", r"STARLUX"),
 ]
-GROUP_BAGS = {name: bags for name, _, bags in AIRLINE_GROUPS}
 GROUP_OTHERS = 5  # 各航空公司除了最低那組，再列幾組日期
 
 
 def group_of(airlines: str) -> str | None:
-    for name, pattern, _ in AIRLINE_GROUPS:
+    for name, pattern in AIRLINE_GROUPS:
         if re.search(pattern, airlines, re.I):
             return name
     return None
@@ -204,10 +202,13 @@ def usable(o: dict) -> bool:
         and (o["stops"] is None or o["stops"] <= MAX_STOPS)
 
 
-def pick(opts: list[dict], group: str | None = None, bags: bool = REQUIRE_BAGS) -> dict | None:
-    """挑最便宜的班次；group 有值時只挑該航空公司組的班次。"""
+def pick(opts: list[dict], group: str | None = None, bags: bool = REQUIRE_BAGS,
+         any_group: bool = False) -> dict | None:
+    """挑最便宜的班次；group 有值時只挑該航空公司組的班次；
+    any_group 時只挑含行李航空組（AIRLINE_GROUPS）裡的班次。"""
     good = [o for o in opts if usable(o)
             and (group is None or group_of(o["airlines"]) == group)
+            and (not any_group or group_of(o["airlines"]) is not None)
             and not (bags and NO_BAG_RE.search(o["airlines"]))
             and not (EXCLUDE_RE and EXCLUDE_RE.search(o["airlines"]))
             and (not REQUIRE_AIRLINE or REQUIRE_AIRLINE.lower() in o["airlines"].lower())
@@ -251,7 +252,7 @@ async def check_one(page, route: str, depart: dt.date, ret: dt.date,
             print("去程範例：", *[o["label"][:200] for o in out_opts[:3]], sep="\n  ", flush=True)
         await select(page, out, out_opts)
         ret_opts = await list_options(page)
-        back = pick(ret_opts, bags=REQUIRE_BAGS and group is None)
+        back = pick(ret_opts, bags=REQUIRE_BAGS and group is None, any_group=group is not None)
         if LIMIT:
             print("回程範例：", *[o["label"][:200] for o in ret_opts[:3]], sep="\n  ", flush=True)
         if not back:
@@ -466,8 +467,7 @@ def airline_report(results: list[dict]) -> str:
         others = [(p, r) for p, r in sorted(est.get(g, []), key=lambda x: x[0])
                   if (r["route"], r["depart"], r["return"]) != key
                   and p <= best["min_price"] * 1.5][:GROUP_OTHERS]
-        bag_note = "" if GROUP_BAGS[g] else "（⚠️ 最便宜票種可能不含託運行李，訂票時請選含行李的票種）"
-        blocks.append(f"◆ {g}：全家 NT${best['min_price']:,}{bag_note}\n" + format_line(best)
+        blocks.append(f"◆ {g}：全家 NT${best['min_price']:,}\n" + format_line(best)
                       + ("\n  其他日期（去程列表上的估計價，未逐一確認）：\n" + "\n".join(
                           "  " + date_line(r["depart"], r["return"], r, p) for p, r in others)
                          if others else ""))
@@ -536,7 +536,7 @@ def main() -> int:
         save_history(history, issue_no)
 
     reasons = []
-    if best < THRESHOLD_TWD:
+    if THRESHOLD_TWD and best < THRESHOLD_TWD:
         reasons.append(f"低於門檻 NT${THRESHOLD_TWD:,}")
     if prev_low is not None and best < prev_low:
         reasons.append(f"比之前歷史最低 NT${prev_low:,} 還便宜 NT${prev_low - best:,}")
@@ -554,7 +554,8 @@ def main() -> int:
 
     airlines_section = airline_report(results)
 
-    body = (f"{recommend}{header}\n門檻：NT${THRESHOLD_TWD:,}\n{summary}\n"
+    body = (f"{recommend}{header}\n" + (f"門檻：NT${THRESHOLD_TWD:,}\n" if THRESHOLD_TWD else "")
+            + f"{summary}\n"
             + ("\n".join(trend) + "\n" if trend else "")
             + "\n【今日最低價】\n" + format_line(ok[0])
             + ("\n其他便宜日期：\n" + "\n".join(
@@ -562,8 +563,9 @@ def main() -> int:
                 for r in ok[1:10]) if len(ok) > 1 else "")
             + "\n\n【各航空公司最低價】（由便宜到貴）\n" + airlines_section
             + "\n\n價格為 Google Flights 顯示的全家（含兒童）含稅總價，去程、回程各選最便宜的傳統航空班次；"
-              + ("「今日最低價」已排除最便宜票種可能不含託運行李的航空（芬航、KLM、法航、漢莎集團、SAS 等）；"
-                 "「各航空公司最低價」則列出這些航空並加註提醒。訂票時仍請確認票種的行李額度；" if REQUIRE_BAGS else "")
+              + ("所有價格都只算長程經濟艙基本票種就含託運行李的航空：已排除最便宜票種可能不含託運行李的"
+                 "芬航、KLM、法航、漢莎集團、SAS、英航等自己開的票；華航、長榮接這些航空的聯程票依華航／長榮規定含託運。"
+                 "這是依航空公司規定判斷，訂票時仍請確認票種的行李額度；" if REQUIRE_BAGS else "")
               + "「其他日期」的約略價格取自去程列表，實際可能略有差異；"
               + "實際價格以航空公司訂票頁為準。")
     flag = "🔥特別推薦！" if reasons else ""
