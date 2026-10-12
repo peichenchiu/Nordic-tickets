@@ -2,11 +2,11 @@ name: Daily Finland/Norway fare check
 
 on:
   schedule:
-    # 台灣時間 11:15 開始（GitHub 排程常晚 10～20 分鐘，查詢約 25 分鐘），信件約中午 12:00 寄達。
+    # 台灣時間 10:30 開始（GitHub 排程常晚 10～20 分鐘，查詢約 60 分鐘），信件約中午 12:00 寄達。
     # cron 用 UTC：台灣 = UTC+8
-    - cron: "15 3 * * *"
+    - cron: "30 2 * * *"
     # 備援：GitHub 忙碌時可能略過排程；主排程已跑過或正在跑，備援會直接跳過
-    - cron: "45 3 * * *"
+    - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -32,7 +32,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - name: Skip if another scheduled run already covers this slot
         id: guard

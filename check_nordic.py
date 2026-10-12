@@ -1,9 +1,9 @@
-"""每日查詢台北 ⇄ 芬蘭／挪威（一進一出）全家機票，只看傳統航空，中午寄 Gmail 報告。
+"""每日查詢台北 ⇄ 芬蘭／挪威／瑞典（任兩國一進一出）全家機票，只看傳統航空，中午寄 Gmail 報告。
 
-用 Google Flights 的「多個城市」查詢：
-  A. 台北 → 赫爾辛基 HEL ……（停留）…… 奧斯陸 OSL → 台北
-  B. 台北 → 奧斯陸 OSL ……（停留）…… 赫爾辛基 HEL → 台北
+用 Google Flights 的「多個城市」查詢：台北 → 甲國 ……（停留）…… 乙國 → 台北，
+甲、乙是赫爾辛基 HEL、奧斯陸 OSL、斯德哥爾摩 ARN 中任兩個（共 6 種走法）。
 每組日期先點選去程最便宜的傳統航空班次，再選回程最便宜的傳統航空班次，讀取全家含稅總價。
+同時記下去程列表上各航空公司的最低價，最後再逐家實際點選確認，列出各航空公司比價。
 設定都可以用環境變數覆寫（見 README）。
 """
 import asyncio
@@ -26,6 +26,9 @@ from playwright.async_api import async_playwright
 ORIGIN = os.getenv("ORIGIN", "TPE")
 FINLAND = os.getenv("FINLAND_AIRPORT", "HEL")  # 赫爾辛基
 NORWAY = os.getenv("NORWAY_AIRPORT", "OSL")  # 奧斯陸
+SWEDEN = os.getenv("SWEDEN_AIRPORT", "ARN")  # 斯德哥爾摩
+COUNTRY = {FINLAND: "芬蘭", NORWAY: "挪威", SWEDEN: "瑞典"}
+ROUTES = [f"{a}-{b}" for a in COUNTRY for b in COUNTRY if a != b]  # 「進 a 出 b」，共 6 種
 DEPART_START = dt.date.fromisoformat(os.getenv("DEPART_START") or "2027-07-18")
 DEPART_END = dt.date.fromisoformat(os.getenv("DEPART_END") or "2027-08-10")
 TRIP_DAYS_MIN = int(os.getenv("TRIP_DAYS_MIN") or "16")
@@ -38,7 +41,7 @@ REQUIRE_BAGS = (os.getenv("REQUIRE_BAGS") or "1") != "0"
 THRESHOLD_TWD = int(os.getenv("THRESHOLD_TWD") or "85000")  # 全家總價低於此就特別推薦
 ADULTS = int(os.getenv("ADULTS") or "2")
 CHILDREN = int(os.getenv("CHILDREN") or "1")  # 2～11 歲
-WORKERS = int(os.getenv("WORKERS") or "6")
+WORKERS = int(os.getenv("WORKERS") or "8")
 LIMIT = int(os.getenv("LIMIT") or "0")  # 只查前幾組（診斷用），0 = 不限
 DRY_RUN = os.getenv("DRY_RUN") == "true"  # 只查價，不寄信也不記錄歷史
 
@@ -68,6 +71,29 @@ EXCLUDE_RE = (re.compile("|".join(rf"\b{re.escape(n)}\b" for n in EXCLUDE_AIRLIN
               if EXCLUDE_AIRLINES else None)
 # 評估用：只看行程中有某家航空的班次（例如 "China Airlines"），空白 = 不限
 REQUIRE_AIRLINE = os.getenv("REQUIRE_AIRLINE") or ""
+# 各航空公司比價：依行程中的航空分組，由上往下比對，先符合的為準。
+# (名稱, 比對用的英文名, 最便宜票種是否一般含託運行李)
+AIRLINE_GROUPS = [
+    ("阿聯酋", r"Emirates", True), ("卡達", r"Qatar Airways", True),
+    ("長榮", r"EVA Air", True), ("華航", r"China Airlines", True),
+    ("國泰", r"Cathay Pacific", True), ("新加坡航空", r"Singapore Airlines", True),
+    ("泰航", r"Thai Airways|Thai(?! Lion| AirAsia| Smile)", True), ("星宇", r"STARLUX", True),
+    ("芬航", r"Finnair", False), ("KLM", r"KLM", False), ("法航", r"Air France", False),
+    ("漢莎", r"Lufthansa", False), ("瑞士航空", r"SWISS|Swiss", False),
+    ("奧地利航空", r"Austrian", False), ("SAS", r"\bSAS\b|Scandinavian", False),
+    ("英航", r"British Airways", False),
+]
+GROUP_BAGS = {name: bags for name, _, bags in AIRLINE_GROUPS}
+GROUP_OTHERS = 5  # 各航空公司除了最低那組，再列幾組日期
+
+
+def group_of(airlines: str) -> str | None:
+    for name, pattern, _ in AIRLINE_GROUPS:
+        if re.search(pattern, airlines):
+            return name
+    return None
+
+
 NO_BAG_RE = re.compile("|".join(rf"\b{re.escape(n)}\b" for n in NO_BAG_FARES))
 # Google Flights 每個班次列的 aria-label，例如：
 # "From 152345 New Taiwan dollars. 1 stop flight with EVA Air and Finnair. Leaves ..."
@@ -171,9 +197,18 @@ async def select(page, opt: dict, before: list[dict]) -> None:
     raise RuntimeError("點選去程後回程列表沒有出現")
 
 
-def pick(opts: list[dict]) -> dict | None:
-    good = [o for o in opts if o["airlines"] and not LOW_COST_RE.search(o["airlines"])
-            and not (REQUIRE_BAGS and NO_BAG_RE.search(o["airlines"]))
+def usable(o: dict) -> bool:
+    """非廉價航空、沒被排除、轉機次數符合。"""
+    return bool(o["airlines"]) and not LOW_COST_RE.search(o["airlines"]) \
+        and not (EXCLUDE_RE and EXCLUDE_RE.search(o["airlines"])) \
+        and (o["stops"] is None or o["stops"] <= MAX_STOPS)
+
+
+def pick(opts: list[dict], group: str | None = None, bags: bool = REQUIRE_BAGS) -> dict | None:
+    """挑最便宜的班次；group 有值時只挑該航空公司組的班次。"""
+    good = [o for o in opts if usable(o)
+            and (group is None or group_of(o["airlines"]) == group)
+            and not (bags and NO_BAG_RE.search(o["airlines"]))
             and not (EXCLUDE_RE and EXCLUDE_RE.search(o["airlines"]))
             and (not REQUIRE_AIRLINE or REQUIRE_AIRLINE.lower() in o["airlines"].lower())
             and (o["stops"] is None or o["stops"] <= MAX_STOPS)]
@@ -188,24 +223,35 @@ async def accept_consent(page) -> None:
             await page.wait_for_load_state("domcontentloaded")
 
 
-async def check_one(page, route: str, depart: dt.date, ret: dt.date) -> dict:
-    first, last = (FINLAND, NORWAY) if route == "A" else (NORWAY, FINLAND)
+async def check_one(page, route: str, depart: dt.date, ret: dt.date,
+                    group: str | None = None) -> dict:
+    """group 為空：找全部航空中最便宜的，並記下去程列表上各航空公司組的最低價（估計值）。
+    group 有值：只點選該航空公司組的去程，確認實際全家總價（回程不限航空，也不套用行李排除）。"""
+    first, last = route.split("-")
     url = search_url([(depart, ORIGIN, first), (ret, last, ORIGIN)])
-    result = {"route": route, "into": first, "out_of": last,
+    result = {"route": route, "into": first, "out_of": last, "group": group,
               "depart": depart.isoformat(), "return": ret.isoformat(), "url": url}
-    tag = f"{route}_{depart.isoformat()}_{ret.isoformat()}"
+    tag = f"{group or 'all'}_{route}_{depart.isoformat()}_{ret.isoformat()}"
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
         await accept_consent(page)
         out_opts = await list_options(page)
-        out = pick(out_opts)
+        if group is None:
+            # 去程列表的「From NT$…」是選這班去程時整趟行程的最低總價，可拿來估各航空公司的價格
+            groups: dict[str, int] = {}
+            for o in out_opts:
+                g = group_of(o["airlines"]) if usable(o) else None
+                if g and o["price"] < groups.get(g, 10**9):
+                    groups[g] = o["price"]
+            result["groups"] = groups
+        out = pick(out_opts, group, bags=REQUIRE_BAGS and group is None)
         if not out:
             return await fail(page, result, tag, out_opts, "去程")
         if LIMIT:
             print("去程範例：", *[o["label"][:200] for o in out_opts[:3]], sep="\n  ", flush=True)
         await select(page, out, out_opts)
         ret_opts = await list_options(page)
-        back = pick(ret_opts)
+        back = pick(ret_opts, bags=REQUIRE_BAGS and group is None)
         if LIMIT:
             print("回程範例：", *[o["label"][:200] for o in ret_opts[:3]], sep="\n  ", flush=True)
         if not back:
@@ -283,12 +329,25 @@ def run_search() -> list[dict]:
     d = DEPART_START
     while d <= DEPART_END:
         for days in range(TRIP_DAYS_MIN, TRIP_DAYS_MAX + 1):
-            for route in ("A", "B"):
+            for route in ROUTES:
                 jobs.append((route, d, d + dt.timedelta(days=days)))
         d += dt.timedelta(days=1)
     if LIMIT:
         jobs = jobs[:LIMIT]
-    return asyncio.run(search_all(jobs))
+    results = asyncio.run(search_all(jobs))
+    # 第二輪：各航空公司組估計最便宜的前 2 組日期，實際點選確認價格
+    est: dict[str, list[tuple[int, dict]]] = {}
+    for r in results:
+        for g, price in (r.get("groups") or {}).items():
+            est.setdefault(g, []).append((price, r))
+    verify = []
+    for g, items in est.items():
+        items.sort(key=lambda x: x[0])
+        for _, r in items[:2]:
+            verify.append((r["route"], dt.date.fromisoformat(r["depart"]),
+                           dt.date.fromisoformat(r["return"]), g))
+    print(f"確認各航空公司價格：{len(verify)} 組", flush=True)
+    return results + asyncio.run(search_all(verify))
 
 
 # ---------- 歷史最低價（存在 GitHub issue 內文） ----------
@@ -303,7 +362,7 @@ def _gh():
 
 def search_config() -> str:
     """查詢條件摘要；條件改了（例如排除某家航空）就重新累積歷史最低價，避免拿不同條件的價格比較。"""
-    return json.dumps([ORIGIN, FINLAND, NORWAY, str(DEPART_START), str(DEPART_END), TRIP_DAYS_MIN,
+    return json.dumps([ORIGIN, FINLAND, NORWAY, SWEDEN, str(DEPART_START), str(DEPART_END), TRIP_DAYS_MIN,
                        TRIP_DAYS_MAX, MAX_STOPS, ADULTS, CHILDREN, REQUIRE_BAGS,
                        sorted(a.lower() for a in EXCLUDE_AIRLINES)])
 
@@ -368,8 +427,7 @@ def send_email_safely(subject: str, body: str) -> None:
 
 
 def route_name(r: dict) -> str:
-    names = {FINLAND: "芬蘭", NORWAY: "挪威"}
-    return f"進{names[r['into']]}{r['into']}／出{names[r['out_of']]}{r['out_of']}"
+    return f"進{COUNTRY[r['into']]}{r['into']}／出{COUNTRY[r['out_of']]}{r['out_of']}"
 
 
 def format_line(r: dict) -> str:
@@ -379,6 +437,40 @@ def format_line(r: dict) -> str:
             f"全家含稅 NT${r['min_price']:,}\n"
             f"  去程 {r['out_airlines']} {stops(r['out_stops'])}；"
             f"回程 {r['ret_airlines']} {stops(r['ret_stops'])}\n  {r['url']}")
+
+
+def date_line(depart: str, ret: str, route: dict, price: int, note: str = "") -> str:
+    """只列日期與價格，不含連結。"""
+    days = (dt.date.fromisoformat(ret) - dt.date.fromisoformat(depart)).days
+    return f"- {depart} 去 / {ret} 回（{days} 天，{route_name(route)}）NT${price:,}{note}"
+
+
+def airline_report(results: list[dict]) -> str:
+    """各航空公司：實際點選確認的最低一組（含連結）＋其他 5 組日期（去程列表上的估計價）。"""
+    verified: dict[str, dict] = {}
+    for r in results:
+        g = r.get("group")
+        if g and r["status"] == "ok" and r["min_price"] < verified.get(g, {}).get("min_price", 10**9):
+            verified[g] = r
+    est: dict[str, list[tuple[int, dict]]] = {}
+    for r in results:
+        if not r.get("group"):
+            for g, price in (r.get("groups") or {}).items():
+                est.setdefault(g, []).append((price, r))
+    blocks = []
+    for g, best in sorted(verified.items(), key=lambda x: x[1]["min_price"]):
+        key = (best["route"], best["depart"], best["return"])
+        others = [(p, r) for p, r in sorted(est.get(g, []), key=lambda x: x[0])
+                  if (r["route"], r["depart"], r["return"]) != key][:GROUP_OTHERS]
+        bag_note = "" if GROUP_BAGS[g] else "（⚠️ 最便宜票種可能不含託運行李，訂票時請選含行李的票種）"
+        blocks.append(f"◆ {g}：全家 NT${best['min_price']:,}{bag_note}\n" + format_line(best)
+                      + ("\n  其他日期（去程列表上的估計價，未逐一確認）：\n" + "\n".join(
+                          "  " + date_line(r["depart"], r["return"], r, p) for p, r in others)
+                         if others else ""))
+    missing = [g for g in est if g not in verified]
+    if missing:
+        blocks.append("（" + "、".join(missing) + " 去程列表上有出現，但點選確認時沒有符合條件的回程）")
+    return "\n\n".join(blocks) if blocks else "（今天沒有查到其他航空公司的價格）"
 
 
 def main() -> int:
@@ -395,7 +487,9 @@ def main() -> int:
     RESULTS.mkdir(exist_ok=True)
     (RESULTS / "nordic.json").write_text(json.dumps(results, ensure_ascii=False, indent=2),
                                          encoding="utf-8")
-    ok = sorted((r for r in results if r["status"] == "ok"), key=lambda r: r["min_price"])
+    ok = sorted((r for r in results if r["status"] == "ok" and not r.get("group")),
+                key=lambda r: r["min_price"])
+    results_main = [r for r in results if not r.get("group")]
     if ok:  # 價格分布，方便評估推薦門檻
         prices = [r["min_price"] for r in ok]
         q = lambda p: prices[min(len(prices) - 1, int(len(prices) * p))]
@@ -406,9 +500,9 @@ def main() -> int:
         print(f"價格分布：最低 {prices[0]:,}、10% {q(0.1):,}、25% {q(0.25):,}、中位數 {q(0.5):,}、"
               f"75% {q(0.75):,}、最高 {prices[-1]:,}")
         print("各航空組合最低：" + "；".join(f"{k} {v:,}" for k, v in sorted(airlines.items(), key=lambda x: x[1])))
-    counts = {s: sum(r["status"] == s for r in results)
+    counts = {s: sum(r["status"] == s for r in results_main)
               for s in ("no_flights", "blocked", "no_price", "error")}
-    summary = (f"查詢 {len(results)} 組日期，成功 {len(ok)} 組；"
+    summary = (f"查詢 {len(results_main)} 組日期，成功 {len(ok)} 組；"
                f"沒有符合條件的傳統航空班次 {counts['no_flights']} 組"
                + (f"，查詢失敗 {counts['blocked'] + counts['no_price'] + counts['error']} 組"
                   if counts['blocked'] + counts['no_price'] + counts['error'] else "") + "。")
@@ -416,7 +510,7 @@ def main() -> int:
 
     now = dt.datetime.now(ZoneInfo("Asia/Taipei"))
     today = now.strftime("%m/%d")
-    header = (f"台北 {ORIGIN} ⇄ 芬蘭 {FINLAND}／挪威 {NORWAY}（一進一出，多個城市行程）\n"
+    header = (f"台北 {ORIGIN} ⇄ 芬蘭 {FINLAND}／挪威 {NORWAY}／瑞典 {SWEDEN}（任兩國一進一出，共 6 種走法）\n"
               f"出發 {DEPART_START}～{DEPART_END}，旅程 {TRIP_DAYS_MIN}～{TRIP_DAYS_MAX} 天，"
               f"經濟艙，{ADULTS} 成人 + {CHILDREN} 兒童，只看傳統航空，每段最多轉機 {MAX_STOPS} 次"
               + ("，只看基本票種就含託運行李的航空" if REQUIRE_BAGS else "")
@@ -454,25 +548,23 @@ def main() -> int:
     if prev_low is not None:
         trend.append(f"之前歷史最低 NT${prev_low:,}")
 
-    by_route = {}
-    for r in ok:
-        by_route.setdefault(r["route"], r)
-    by_depart: dict[str, dict] = {}
-    for r in ok:
-        by_depart.setdefault(r["depart"], r)
-    table = [f"{d}  NT${r['min_price']:,}（{(dt.date.fromisoformat(r['return']) - dt.date.fromisoformat(d)).days} 天，"
-             f"{route_name(r)}）" for d, r in sorted(by_depart.items())]
+    airlines_section = airline_report(results)
 
     body = (f"{recommend}{header}\n門檻：NT${THRESHOLD_TWD:,}\n{summary}\n"
             + ("\n".join(trend) + "\n" if trend else "")
-            + "\n【今日最便宜 10 組】\n" + "\n".join(format_line(r) for r in ok[:10])
-            + "\n\n【兩種走法各自最低】\n" + "\n".join(format_line(r) for r in by_route.values())
-            + "\n\n【每個出發日的最低價】\n" + "\n".join(table)
+            + "\n【今日最低價】\n" + format_line(ok[0])
+            + ("\n其他便宜日期：\n" + "\n".join(
+                date_line(r["depart"], r["return"], r, r["min_price"], f"，{r['out_airlines']}")
+                for r in ok[1:10]) if len(ok) > 1 else "")
+            + "\n\n【各航空公司最低價】（由便宜到貴）\n" + airlines_section
             + "\n\n價格為 Google Flights 顯示的全家（含兒童）含稅總價，去程、回程各選最便宜的傳統航空班次；"
-              + ("已排除最便宜票種可能不含託運行李的航空（芬航、KLM、法航、漢莎集團、SAS 等），"
-                 "列出的航空長程經濟艙一般含託運行李，訂票時仍請確認票種的行李額度；" if REQUIRE_BAGS else "")
+              + ("「今日最低價」已排除最便宜票種可能不含託運行李的航空（芬航、KLM、法航、漢莎集團、SAS 等）；"
+                 "「各航空公司最低價」則列出這些航空並加註提醒。訂票時仍請確認票種的行李額度；" if REQUIRE_BAGS else "")
+              + "「其他日期」的約略價格取自去程列表，實際可能略有差異；"
               + "實際價格以航空公司訂票頁為準。")
     flag = "🔥特別推薦！" if reasons else ""
+    if DRY_RUN:  # 評估用：把信件內容印在紀錄裡
+        print(body)
     send_email_safely(f"✈️ 芬蘭挪威 {today}：全家最低 NT${best:,} {flag}".strip(), body)
     return 0
 
