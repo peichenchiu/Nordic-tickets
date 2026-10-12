@@ -23,9 +23,6 @@ on:
       require_airline:
         description: "評估用：只看有這家航空的行程（英文名稱，例如 China Airlines）；會同時取消託運行李排除"
         required: false
-      profile:
-        description: "只跑其中一個查詢：economy（經濟艙）或 etihad（阿提哈德商務艙）；空白 = 兩個都跑"
-        required: false
 
 permissions:
   actions: read
@@ -36,35 +33,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    # 兩個查詢同時跑，各自寄一封信、各自記錄歷史最低價
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: economy
-            report_name: 芬蘭挪威
-            cabin: economy
-            only_airline: ""
-            via: ""
-            history_label: nordic-history
-            threshold: "85000"
-            require_bags: ""
-          - profile: etihad
-            report_name: 阿提哈德商務艙
-            cabin: business
-            only_airline: Etihad
-            via: Abu Dhabi
-            history_label: nordic-etihad-history
-            threshold: "0"  # 先不設門檻：只在創歷史新低或比最近 7 天平均便宜 5% 時推薦
-            require_bags: "0"  # 商務艙一定含託運行李
     steps:
-      - name: Skip profiles not requested
-        id: pick
-        if: inputs.profile && inputs.profile != matrix.profile
-        run: echo "skip=true" >> "$GITHUB_OUTPUT"
       - name: Skip if another scheduled run already covers this slot
         id: guard
-        if: github.event_name == 'schedule' && steps.pick.outputs.skip != 'true'
+        if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -74,27 +46,21 @@ jobs:
                    and (.conclusion == \"success\" or .status == \"in_progress\" or .status == \"queued\"))] | length")
           echo "earlier runs in this slot: $n"
           if [ "$n" -gt 0 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
-      - if: steps.guard.outputs.skip != 'true' && steps.pick.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true'
         uses: actions/checkout@v4
-      - if: steps.guard.outputs.skip != 'true' && steps.pick.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - if: steps.guard.outputs.skip != 'true' && steps.pick.outputs.skip != 'true'
+      - if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt && python -m playwright install --with-deps chromium
       - name: Check fares
-        if: steps.guard.outputs.skip != 'true' && steps.pick.outputs.skip != 'true'
+        if: steps.guard.outputs.skip != 'true'
         env:
           LIMIT: ${{ inputs.limit }}
           DRY_RUN: ${{ inputs.dry_run }}
           REQUIRE_AIRLINE: ${{ inputs.require_airline }}
-          REQUIRE_BAGS: ${{ inputs.require_airline && '0' || matrix.require_bags }}
-          REPORT_NAME: ${{ matrix.report_name }}
-          CABIN: ${{ matrix.cabin }}
-          ONLY_AIRLINE: ${{ matrix.only_airline }}
-          VIA: ${{ matrix.via }}
-          HISTORY_LABEL: ${{ matrix.history_label }}
-          THRESHOLD_TWD: ${{ matrix.threshold }}
+          REQUIRE_BAGS: ${{ inputs.require_airline && '0' || '' }}
           TEST_EMAIL: ${{ inputs.test_email }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -103,10 +69,10 @@ jobs:
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: python check_nordic.py
       - name: Upload results & debug
-        if: always() && steps.guard.outputs.skip != 'true' && steps.pick.outputs.skip != 'true'
+        if: always() && steps.guard.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: nordic-results-${{ matrix.profile }}
+          name: nordic-results
           path: |
             results/
             debug/
