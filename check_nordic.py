@@ -41,7 +41,7 @@ REQUIRE_BAGS = (os.getenv("REQUIRE_BAGS") or "1") != "0"
 THRESHOLD_TWD = int(os.getenv("THRESHOLD_TWD") or "85000")  # 全家總價低於此就特別推薦
 ADULTS = int(os.getenv("ADULTS") or "2")
 CHILDREN = int(os.getenv("CHILDREN") or "1")  # 2～11 歲
-WORKERS = int(os.getenv("WORKERS") or "8")
+WORKERS = int(os.getenv("WORKERS") or "6")
 LIMIT = int(os.getenv("LIMIT") or "0")  # 只查前幾組（診斷用），0 = 不限
 DRY_RUN = os.getenv("DRY_RUN") == "true"  # 只查價，不寄信也不記錄歷史
 
@@ -89,7 +89,7 @@ GROUP_OTHERS = 5  # 各航空公司除了最低那組，再列幾組日期
 
 def group_of(airlines: str) -> str | None:
     for name, pattern, _ in AIRLINE_GROUPS:
-        if re.search(pattern, airlines):
+        if re.search(pattern, airlines, re.I):
             return name
     return None
 
@@ -309,7 +309,7 @@ async def search_all(jobs: list[tuple[str, dt.date, dt.date]]) -> list[dict]:
         while not queue.empty():
             job = queue.get_nowait()
             r = await check_one(page, *job)
-            if r["status"] == "error":  # 偶爾點選後頁面沒反應，重查一次通常就好
+            if r["status"] in ("error", "no_price"):  # 偶爾頁面沒載完或點選後沒反應，重查一次通常就好
                 await asyncio.sleep(3)
                 r = await check_one(page, *job)
             print(json.dumps(r, ensure_ascii=False), flush=True)
@@ -460,8 +460,10 @@ def airline_report(results: list[dict]) -> str:
     blocks = []
     for g, best in sorted(verified.items(), key=lambda x: x[1]["min_price"]):
         key = (best["route"], best["depart"], best["return"])
+        # 列表上偶爾會有其他艙等或很貴的組合，超過最低價 1.5 倍的不列
         others = [(p, r) for p, r in sorted(est.get(g, []), key=lambda x: x[0])
-                  if (r["route"], r["depart"], r["return"]) != key][:GROUP_OTHERS]
+                  if (r["route"], r["depart"], r["return"]) != key
+                  and p <= best["min_price"] * 1.5][:GROUP_OTHERS]
         bag_note = "" if GROUP_BAGS[g] else "（⚠️ 最便宜票種可能不含託運行李，訂票時請選含行李的票種）"
         blocks.append(f"◆ {g}：全家 NT${best['min_price']:,}{bag_note}\n" + format_line(best)
                       + ("\n  其他日期（去程列表上的估計價，未逐一確認）：\n" + "\n".join(
