@@ -2,11 +2,11 @@ name: Daily Finland/Norway fare check
 
 on:
   schedule:
-    # 台灣時間 11:15 開始（GitHub 排程常晚 10～20 分鐘，查詢約 25 分鐘），信件約中午 12:00 寄達。
+    # 台灣時間 09:30 開始（GitHub 排程常晚 10～20 分鐘，864 組查詢約 2 小時），信件約中午 12:00 前寄達。
     # cron 用 UTC：台灣 = UTC+8
-    - cron: "15 3 * * *"
+    - cron: "30 1 * * *"
     # 備援：GitHub 忙碌時可能略過排程；主排程已跑過或正在跑，備援會直接跳過
-    - cron: "45 3 * * *"
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -16,6 +16,13 @@ on:
         description: "只寄一封測試信（不查票）"
         type: boolean
         default: false
+      dry_run:
+        description: "只查價、不寄信、不記錄歷史（評估用）"
+        type: boolean
+        default: false
+      require_airline:
+        description: "評估用：只看有這家航空的行程（英文名稱，例如 China Airlines）；會同時取消託運行李排除"
+        required: false
 
 permissions:
   actions: read
@@ -25,7 +32,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - name: Skip if another scheduled run already covers this slot
         id: guard
@@ -51,10 +58,13 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         env:
           LIMIT: ${{ inputs.limit }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REQUIRE_AIRLINE: ${{ inputs.require_airline }}
+          REQUIRE_BAGS: ${{ inputs.require_airline && '0' || '' }}
           TEST_EMAIL: ${{ inputs.test_email }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_USER: ${{ inputs.dry_run != true && secrets.SMTP_USER || '' }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
         run: python check_nordic.py
