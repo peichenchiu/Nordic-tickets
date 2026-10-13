@@ -294,7 +294,7 @@ async def fail(page, result: dict, tag: str, opts: list[dict], leg: str) -> dict
     else:
         status = "no_price"
     result.update(status=status, leg=leg, options=len(opts))
-    if status == "no_price":  # 診斷用：記下頁面開頭，看是沒載完、被擋還是版面不同
+    if status == "no_price" or not opts:  # 診斷用：記下頁面開頭，看是沒載完、被擋還是版面不同
         result["page"] = re.sub(r"\s+", " ", text)[:300]
     if status != "no_flights":
         await save_debug(page, tag)
