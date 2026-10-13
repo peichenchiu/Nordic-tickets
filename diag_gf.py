@@ -17,13 +17,13 @@ def tfs(legs, trip):
     return "https://www.google.com/travel/flights/search?" + urlencode({"tfs": t, "hl": "en", "gl": "TW", "curr": "TWD"})
 
 
-URLS = {
-    "multi-city (目前用的)": tfs([(d1, "TPE", "HEL"), (d2, "OSL", "TPE")], 3),
-    "one-way tfs": tfs([(d1, "TPE", "HEL")], 2),
-    "round-trip tfs": tfs([(d1, "TPE", "HEL"), (d2, "HEL", "TPE")], 1),
-    "q= one-way": "https://www.google.com/travel/flights?hl=en&gl=TW&curr=TWD&q=" + quote("Flights from TPE to HEL on 2027-07-18 one way"),
-    "q= 2026 near date": "https://www.google.com/travel/flights?hl=en&gl=TW&curr=TWD&q=" + quote("Flights from TPE to HEL on 2026-11-20 one way"),
-}
+def q(d):
+    return "https://www.google.com/travel/flights?hl=en&gl=TW&curr=TWD&q=" + quote(f"Flights from TPE to HEL on {d} one way")
+
+
+URLS = {f"q= {d}": q(d) for d in ["2026-12-15", "2027-02-15", "2027-04-15", "2027-05-15", "2027-06-15",
+                                    "2027-07-01", "2027-07-18", "2027-08-10"]}
+URLS["multi-city 2027-07-18"] = tfs([(d1, "TPE", "HEL"), (d2, "OSL", "TPE")], 3)
 
 
 async def main():
@@ -34,7 +34,7 @@ async def main():
         page = await ctx.new_page()
         for name, url in URLS.items():
             await page.goto(url, wait_until="domcontentloaded", timeout=90_000)
-            await page.wait_for_timeout(20_000)
+            await page.wait_for_timeout(15_000)
             text = re.sub(r"\s+", " ", await page.inner_text("body"))
             n = await page.locator('[aria-label*="Taiwan dollars"]').count()
             oops = "something went wrong" in text
