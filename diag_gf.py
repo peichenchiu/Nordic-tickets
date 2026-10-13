@@ -2,6 +2,8 @@
 import asyncio, base64, re
 from urllib.parse import urlencode, quote
 from playwright.async_api import async_playwright
+import os
+os.environ["LIMIT"] = ""
 import check_nordic as c
 import datetime as dt
 
