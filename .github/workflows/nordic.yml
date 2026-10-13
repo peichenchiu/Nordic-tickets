@@ -32,7 +32,7 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - name: Skip if another scheduled run already covers this slot
         id: guard
@@ -67,7 +67,7 @@ jobs:
           SMTP_USER: ${{ inputs.dry_run != true && secrets.SMTP_USER || '' }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-        run: if [ "${{ inputs.limit }}" = "diag" ]; then python diag_gf.py; else python check_nordic.py; fi
+        run: python check_nordic.py
       - name: Upload results & debug
         if: always() && steps.guard.outputs.skip != 'true'
         uses: actions/upload-artifact@v4

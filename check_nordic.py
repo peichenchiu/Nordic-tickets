@@ -14,6 +14,7 @@ import os
 import re
 import smtplib
 import sys
+import time
 from email.mime.text import MIMEText
 from pathlib import Path
 from urllib.parse import urlencode
@@ -45,6 +46,8 @@ CHILDREN = int(os.getenv("CHILDREN") or "1")  # 2～11 歲
 WORKERS = int(os.getenv("WORKERS") or "6")
 LIMIT = int(os.getenv("LIMIT") or "0")  # 只查前幾組（診斷用），0 = 不限
 DRY_RUN = os.getenv("DRY_RUN") == "true"  # 只查價，不寄信也不記錄歷史
+RETRY_STATUSES = ("error", "no_price", "google_error")
+RETRY_WAIT_MIN = int(os.getenv("RETRY_WAIT_MIN") or "10")  # 第一輪結束後，失敗的等幾分鐘再重查一輪
 
 RESULTS = Path("results")
 DEBUG = Path("debug")
@@ -289,6 +292,8 @@ async def fail(page, result: dict, tag: str, opts: list[dict], leg: str) -> dict
     text = await page.inner_text("body")
     if re.search(r"unusual traffic|not a robot|captcha", text, re.I):
         status = "blocked"
+    elif re.search(r"something went wrong", text, re.I):
+        status = "google_error"  # Google Flights 暫時出錯（時好時壞），稍後重查通常就好
     elif opts or re.search(r"No (results|flights) (returned|found)|no options", text, re.I):
         status = "no_flights"  # 有班次但全是廉價航空或轉機太多，或當天沒有班次
     else:
@@ -337,7 +342,7 @@ async def search_all(jobs: list[tuple[str, dt.date, dt.date]]) -> list[dict]:
         while not queue.empty():
             job = queue.get_nowait()
             r = await check_one(page, *job)
-            if r["status"] in ("error", "no_price"):  # 偶爾頁面沒載完或點選後沒反應，稍等再查一次
+            if r["status"] in RETRY_STATUSES:  # 偶爾頁面沒載完、Google 出錯或點選後沒反應，稍等再查一次
                 await asyncio.sleep(20)
                 r = await check_one(page, *job)
             print(json.dumps(r, ensure_ascii=False), flush=True)
@@ -363,6 +368,16 @@ def run_search() -> list[dict]:
     if LIMIT:
         jobs = jobs[:LIMIT]
     results = asyncio.run(search_all(jobs))
+    # Google Flights 有時一段時間內大量回「Oops, something went wrong」；等一陣子再把失敗的重查一輪
+    failed = [i for i, r in enumerate(results) if r["status"] in RETRY_STATUSES]
+    if failed and RETRY_WAIT_MIN and not LIMIT:
+        print(f"{len(failed)} 組查詢失敗，{RETRY_WAIT_MIN} 分鐘後重查", flush=True)
+        time.sleep(RETRY_WAIT_MIN * 60)
+        redo = asyncio.run(search_all([(results[i]["route"], dt.date.fromisoformat(results[i]["depart"]),
+                                        dt.date.fromisoformat(results[i]["return"])) for i in failed]))
+        key = lambda r: (r["route"], r["depart"], r["return"])
+        redo_by_key = {key(r): r for r in redo}
+        results = [redo_by_key.get(key(r), r) if r["status"] in RETRY_STATUSES else r for r in results]
     # 第二輪：各航空公司組估計最便宜的前 2 組日期，實際點選確認價格
     est: dict[str, list[tuple[int, dict]]] = {}
     for r in results:
@@ -535,11 +550,13 @@ def main() -> int:
               f"75% {q(0.75):,}、最高 {prices[-1]:,}")
         print("各航空組合最低：" + "；".join(f"{k} {v:,}" for k, v in sorted(airlines.items(), key=lambda x: x[1])))
     counts = {s: sum(r["status"] == s for r in results_main)
-              for s in ("no_flights", "blocked", "no_price", "error")}
+              for s in ("no_flights", "blocked", "no_price", "error", "google_error")}
+    n_fail = counts["blocked"] + counts["no_price"] + counts["error"] + counts["google_error"]
     summary = (f"查詢 {len(results_main)} 組日期，成功 {len(ok)} 組；"
                f"沒有符合條件的傳統航空班次 {counts['no_flights']} 組"
-               + (f"，查詢失敗 {counts['blocked'] + counts['no_price'] + counts['error']} 組"
-                  if counts['blocked'] + counts['no_price'] + counts['error'] else "") + "。")
+               + (f"，查詢失敗 {n_fail} 組" if n_fail else "")
+               + (f"（其中 Google Flights 回「Oops, something went wrong」{counts['google_error']} 組）"
+                  if counts['google_error'] else "") + "。")
     print(summary)
 
     now = dt.datetime.now(ZoneInfo("Asia/Taipei"))
@@ -553,8 +570,11 @@ def main() -> int:
     if not ok:
         print("沒有抓到任何價格，請查看 artifact 中的 debug 截圖。", file=sys.stderr)
         send_email_safely(f"⚠️ 芬蘭挪威機票 {today}：查詢失敗",
-                          f"{header}\n\n{summary}\nGoogle Flights 可能擋了自動查詢或改版，"
-                          "請查看 GitHub Actions 紀錄。")
+                          f"{header}\n\n{summary}\n"
+                          + ("Google Flights 今天一直回錯誤頁（Oops, something went wrong），通常是 Google 暫時不穩，"
+                             "明天多半會恢復；也可以到 GitHub Actions 手動 Run workflow 重查。"
+                             if counts["google_error"] else
+                             "Google Flights 可能擋了自動查詢或改版，請查看 GitHub Actions 紀錄。"))
         return 1
 
     best = ok[0]["min_price"]
