@@ -296,6 +296,12 @@ async def fail(page, result: dict, tag: str, opts: list[dict], leg: str) -> dict
     result.update(status=status, leg=leg, options=len(opts))
     if status == "no_price" or not opts:  # 診斷用：記下頁面開頭，看是沒載完、被擋還是版面不同
         result["page"] = re.sub(r"\s+", " ", text)[:300]
+        if LIMIT:
+            print("頁面文字：", re.sub(r"\s+", " ", text)[:3000], flush=True)
+            labels = await page.evaluate("""() => [...document.querySelectorAll('[aria-label]')]
+                .map(e => e.getAttribute('aria-label')).filter(t => /dollar|NT\\$|TWD|stop|flight/i.test(t))
+                .slice(0, 15)""")
+            print("相關 aria-label：", *labels, sep="\n  ", flush=True)
     if status != "no_flights":
         await save_debug(page, tag)
     return result
